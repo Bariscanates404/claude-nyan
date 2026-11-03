@@ -1,0 +1,135 @@
+#!/bin/bash
+# nyan , names the Claude tab this runs in.
+#
+# The tab is running Claude, not a shell, so run it from inside the session
+# with a leading `!`:
+#
+#   !nyan name my api work              name this tab
+#   !nyan name                          print the current name
+#   !nyan clear                         drop it, back to folder · branch
+#   !nyan list                          every tab and its name
+#   !nyan                               this help
+#
+# The name is stored against the tab's tty, so it outlives the session, and it
+# reappears with the done marker every time Claude finishes.
+
+set -u
+
+STATE="${XDG_DATA_HOME:-$HOME/.local/share}/claude-nyan"
+. "$STATE/lib.sh"
+
+NAMES="$STATE/names"
+mkdir -p "$NAMES" 2>/dev/null || true
+
+usage() {
+  cat <<'EOF'
+nyan: name this tab
+
+  !nyan name <name>    set the name
+  !nyan name           print the current name
+  !nyan clear          drop it, back to folder · branch
+  !nyan list           every tab and its name
+
+The leading ! matters: the tab is running Claude, and it hands the command to the shell.
+EOF
+}
+
+# `list` needs no tty of its own.
+if [ "${1:-}" = "list" ]; then
+  printf '%-10s  %s\n' "TAB" "NAME"
+  found=0
+  for f in "$NAMES"/*; do
+    [ -f "$f" ] || continue
+    printf '%-10s  %s\n' "$(basename "$f")" "$(head -n1 "$f")"
+    found=1
+  done
+  [ "$found" = 0 ] && echo "(no tab has a name yet)"
+  exit 0
+fi
+
+# Refuse rather than guess. The name is filed under the tty, so resolving the
+# wrong one files it where nothing will ever read it again.
+TTYNAME="$(nyan_tty)" || {
+  echo "nyan: could not find this tab's tty, name not saved" >&2
+  exit 1
+}
+DEV="/dev/$TTYNAME"
+KEY="$(echo "$TTYNAME" | tr '/' '_')"
+FILE="$NAMES/$KEY"
+PIDFILE="$STATE/spin-$KEY.pid"
+LOCKDIR="$STATE/spin-$KEY.lock"
+
+# Repaint now, so the change is visible without waiting for the next turn. If a
+# spinner is turning, Claude is mid-answer: restart it on the new name rather
+# than freezing the tab on a static title it would fight.
+#
+# This runs the same read-kill-write as the Stop hook, on the same files, and
+# being typed mid-answer is exactly when the hook is also firing , so it takes
+# the same mutex and calls the same stop. The two used to be separate copies.
+#
+# "Is a spinner running" is a question about identity, not about a number: a
+# bare `kill -0` on a stale pid that the OS has since reissued answers yes for
+# a process that has nothing to do with this tab.
+repaint() {
+  local name="$1" old owner spinning=""
+  nyan_lock "$LOCKDIR" || true
+  trap 'nyan_unlock "$LOCKDIR"' EXIT
+  old="$(head -n1 "$PIDFILE" 2>/dev/null | tr -d ' ')"
+  case "$old" in
+    ''|*[!0-9]*) ;;
+    *) nyan_is_spinner "$old" && spinning=yes ;;
+  esac
+  nyan_stop_spinner "$PIDFILE"
+  if [ -n "$spinning" ]; then
+    owner="$(nyan_claude_pid || true)"
+    nyan_title "$DEV" "🔴 $name"
+    nohup bash "$STATE/nyan-spin.sh" "$DEV" "$name" "$owner" >/dev/null 2>&1 &
+    { echo $! > "$PIDFILE"; } 2>/dev/null
+  else
+    nyan_title "$DEV" "✅ $name"
+  fi
+  nyan_unlock "$LOCKDIR"
+  trap - EXIT
+  return 0
+}
+
+case "${1:-}" in
+  name)
+    shift
+    if [ "$#" -eq 0 ]; then
+      if [ -f "$FILE" ]; then echo "nyan: $TTYNAME -> $(head -n1 "$FILE")"
+      else echo "nyan: $TTYNAME -> no name set, using folder · branch"; fi
+      exit 0
+    fi
+    # Announced only if it was actually stored. An unwritable state directory
+    # used to still print "the name is now X", and the name was gone by the
+    # next turn.
+    if { printf '%s\n' "$*" > "$FILE"; } 2>/dev/null; then
+      repaint "$*"
+      echo "nyan: $TTYNAME is now \"$*\""
+    else
+      echo "nyan: could not save the name ($FILE is not writable)" >&2
+      exit 1
+    fi
+    ;;
+  clear)
+    rm -f "$FILE"
+    NAME="$(/usr/bin/basename "$PWD")"
+    if BR="$(/usr/bin/git -C "$PWD" branch --show-current 2>/dev/null)" && [ -n "$BR" ]; then
+      BR="${BR##*/}"
+      case "$BR" in *-*-*) BR="$(awk -F- '{print $(NF-1)"-"$NF}' <<< "$BR")" ;; esac
+      NAME="$NAME · $BR"
+    fi
+    repaint "$NAME"
+    echo "nyan: $TTYNAME name cleared -> $NAME"
+    ;;
+  ""|help|-h|--help)
+    usage
+    ;;
+  *)
+    echo "nyan: unknown command \"$1\"" >&2
+    echo >&2
+    usage >&2
+    exit 1
+    ;;
+esac

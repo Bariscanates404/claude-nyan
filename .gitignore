@@ -1,0 +1,19 @@
+# Per-machine runtime state, never code.
+#
+# names/     the tab names you set with `nyan name`, keyed by tty
+# spin-*.pid the running spinner daemons
+# spin-*.lock the per-tty mutex, and the .stale.<pid> dirs a break renames aside
+# branch-*   the 10-second git branch cache
+#
+# All of them are rebuilt on their own and are meaningless on another machine,
+# because a tty number is not stable across reboots, let alone across hosts.
+
+names/
+spin-*.pid
+spin-*.lock*
+branch-*
+
+# rate-limits: the status line's last usage reading, and what a killed write leaves.
+# backup-*: local copies from before a hook change.
+rate-limits*
+backup-*/
